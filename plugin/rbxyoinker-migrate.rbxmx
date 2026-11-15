@@ -244,6 +244,7 @@ local watched = {
 local token = plugin:GetSetting("rbxyoinkerToken") or ""
 local refs = {}
 local scriptRefs = {}
+local attributeRefs = {}
 local lastMap = {}
 local seenRun = -1
 local appVersion = nil
@@ -1077,9 +1078,32 @@ local function call(method, path, body, quiet)
 	return decoded.data
 end
 
+local function attributeHits(inst)
+	local hits = {}
+	local ok, attributes = pcall(inst.GetAttributes, inst)
+	if not ok then
+		return hits
+	end
+	for name, value in attributes do
+		if typeof(value) == "string" then
+			for digits in string.gmatch(value, "%f[%w](%d+)%f[%W]") do
+				if #digits >= 6 and #digits <= 16 then
+					local explicit = string.find(value, "rbxassetid://" .. digits, 1, true) ~= nil
+						or string.find(value, "[?&]id=" .. digits) ~= nil
+					table.insert(hits, { attribute = name, id = digits, explicit = explicit, text = value })
+				end
+			end
+		elseif typeof(value) == "number" and value >= 100000 and value < 1e16 and value % 1 == 0 then
+			table.insert(hits, { attribute = name, id = string.format("%d", value), explicit = false, text = tostring(value) })
+		end
+	end
+	return hits
+end
+
 local function scan(config, roots)
 	local foundRefs = {}
 	local foundScripts = {}
+	local foundAttributes = {}
 	local ids = {}
 	local seen = {}
 	local inProps = {}
@@ -1166,6 +1190,25 @@ local function scan(config, roots)
 				end
 			end
 		end
+		local counted = false
+		for _, hit in attributeHits(inst) do
+			local keep = hit.explicit or config.scripts
+			if hit.explicit then
+				inProps[hit.id] = true
+			elseif config.scripts and not inScripts[hit.id] then
+				inScripts[hit.id] = { script = inst:GetFullName() .. " (attribute)", line = hit.attribute .. " = " .. string.sub(hit.text, 1, 140) }
+			end
+			if keep then
+				counted = true
+				if not seen[hit.id] then
+					seen[hit.id] = true
+					table.insert(ids, hit.id)
+				end
+			end
+		end
+		if counted then
+			table.insert(foundAttributes, inst)
+		end
 	end
 	local fromScripts = {}
 	for digits, where in inScripts do
@@ -1173,7 +1216,7 @@ local function scan(config, roots)
 			table.insert(fromScripts, { id = digits, script = where.script, line = where.line })
 		end
 	end
-	return { ids = ids, fromScripts = fromScripts, refs = foundRefs, scriptRefs = foundScripts }
+	return { ids = ids, fromScripts = fromScripts, refs = foundRefs, scriptRefs = foundScripts, attributeRefs = foundAttributes }
 end
 
 local function usersOf(wanted)
@@ -1209,6 +1252,14 @@ local function usersOf(wanted)
 								table.insert(found, inst)
 								break
 							end
+						end
+					end
+				end
+				if found[#found] ~= inst then
+					for _, hit in attributeHits(inst) do
+						if wanted[hit.id] then
+							table.insert(found, inst)
+							break
 						end
 					end
 				end
@@ -1315,6 +1366,28 @@ local function showAnims(state)
 	showScope()
 end
 
+local function swapAttributes(inst)
+	local swapped = 0
+	local ok, attributes = pcall(inst.GetAttributes, inst)
+	for name, value in ok and attributes or {} do
+		if typeof(value) == "string" then
+			local text = value
+			for oldId, newId in lastMap do
+				local replaced, count = string.gsub(text, "%f[%w]" .. oldId .. "%f[%W]", newId)
+				text = replaced
+				swapped += count
+			end
+			if text ~= value then
+				inst:SetAttribute(name, text)
+			end
+		elseif typeof(value) == "number" and lastMap[string.format("%d", value)] then
+			inst:SetAttribute(name, tonumber(lastMap[string.format("%d", value)]))
+			swapped += 1
+		end
+	end
+	return swapped
+end
+
 local function applySwaps()
 	local swapped = 0
 	local waiting = 0
@@ -1358,6 +1431,11 @@ local function applySwaps()
 				end
 				return source
 			end)
+		end
+	end
+	for _, inst in attributeRefs do
+		if inst.Parent then
+			swapped += swapAttributes(inst)
 		end
 	end
 	if recording then
@@ -1458,9 +1536,10 @@ local function scanAndSend()
 	setStatus("")
 	local config = call("GET", "/api/studio/scan")
 	local found = config and scan(config, scope == "selection" and Selection:Get() or nil)
-		or { ids = {}, fromScripts = {}, refs = {}, scriptRefs = {} }
+		or { ids = {}, fromScripts = {}, refs = {}, scriptRefs = {}, attributeRefs = {} }
 	refs = found.refs
 	scriptRefs = found.scriptRefs
+	attributeRefs = found.attributeRefs
 	local ids = found.ids
 	local fromScripts = found.fromScripts
 	local sent = nil
