@@ -492,9 +492,12 @@ impl Roblox {
     }
 
     pub async fn manageable_groups(&self, cookie: &str) -> Option<Vec<i64>> {
+        // This endpoint specifically returns groups where the authenticated user
+        // can manage games or items. The older /canmanage endpoint is broader
+        // and does not reliably identify asset-upload destinations.
         let resp = self
             .http
-            .get("https://develop.roblox.com/v1/user/groups/canmanage")
+            .get("https://develop.roblox.com/v1/user/groups/canmanagegamesoritems")
             .roblox_cookie(cookie)
             .send()
             .await
@@ -503,7 +506,7 @@ impl Roblox {
             return None;
         }
         let v: Value = resp.json().await.ok()?;
-        Some(v["data"].as_array()?.iter().filter_map(|it| it["id"].as_i64()).collect())
+        parse_managed_group_ids(&v)
     }
 
     pub async fn group_icons(&self, ids: &[i64]) -> HashMap<i64, String> {
@@ -908,9 +911,47 @@ fn asset_id_from(v: &Value) -> Option<i64> {
         .find_map(|x| x.as_i64().or_else(|| x.as_str().and_then(|s| s.parse().ok())))
 }
 
+fn parse_managed_group_ids(v: &Value) -> Option<Vec<i64>> {
+    let groups = v["data"].as_array()?;
+    Some(
+        groups
+            .iter()
+            .filter_map(|group| {
+                [&group["id"], &group["groupId"], &group["group"]["id"]]
+                    .into_iter()
+                    .find_map(|id| {
+                        id.as_i64()
+                            .or_else(|| id.as_str().and_then(|s| s.parse::<i64>().ok()))
+                    })
+            })
+            .filter(|id| *id > 0)
+            .collect(),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parses_groups_from_manage_games_or_items_response() {
+        let response = json!({
+            "data": [
+                { "id": 123, "name": "Final Circuit" },
+                { "id": "456", "name": "Second group" },
+                { "groupId": 789 },
+                { "group": { "id": 321 } },
+                { "name": "Missing id" },
+                { "id": -1 }
+            ]
+        });
+        assert_eq!(parse_managed_group_ids(&response), Some(vec![123, 456, 789, 321]));
+    }
+
+    #[test]
+    fn rejects_invalid_manage_games_or_items_response() {
+        assert_eq!(parse_managed_group_ids(&json!({ "errors": [] })), None);
+    }
 
     #[test]
     fn cookie_only_goes_to_roblox() {
