@@ -1959,15 +1959,23 @@ async fn migrate_targets(State(st): State<AppState>) -> Json<Value> {
     let mut out = Vec::new();
     for (uid, username, avatar) in st.pool.alive_users() {
         let Some(cookie) = st.pool.cookie_for_user(uid) else { continue };
-        let manage = st.rb.manageable_groups(&cookie).await.unwrap_or_default();
-        let groups: Vec<_> = st.rb.user_groups(uid).await.into_iter().filter(|g| manage.contains(&g.id)).collect();
-        let ids: Vec<i64> = groups.iter().map(|g| g.id).collect();
-        let icons = st.rb.group_icons(&ids).await;
+        let group_ids = st.rb.manageable_groups(&cookie).await.unwrap_or_default();
+        let owner_keys: Vec<String> = group_ids.iter().map(|id| format!("Group:{id}")).collect();
+        let names = st.rb.owner_names(&owner_keys).await;
+        let icons = st.rb.group_icons(&group_ids).await;
+        let groups = group_ids.iter().map(|id| {
+            let key = format!("Group:{id}");
+            json!({
+                "id": id,
+                "name": names.get(&key).cloned().unwrap_or_else(|| format!("Group {id}")),
+                "icon": icons.get(id),
+            })
+        }).collect::<Vec<_>>();
         out.push(json!({
             "user_id": uid,
             "username": username,
             "avatar": avatar,
-            "groups": groups.iter().map(|g| json!({ "id": g.id, "name": g.name, "icon": icons.get(&g.id) })).collect::<Vec<_>>(),
+            "groups": groups,
         }));
     }
     ok(json!(out))
